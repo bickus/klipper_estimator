@@ -20,6 +20,7 @@ This document provides a comprehensive breakdown of the Klipper print time estim
 12. [G-code Commands Affecting Timing](#12-g-code-commands-affecting-timing)
 13. [Complete Formulas Reference](#13-complete-formulas-reference)
 14. [Implementation Pseudocode](#14-implementation-pseudocode)
+15. [Parameter Usage Reference Table](#15-parameter-usage-reference-table)
 
 ---
 
@@ -1086,6 +1087,170 @@ def plan_velocities(moves):
         next_end_v2 = start_v2
         next_smoothed_v2 = smoothed_v2
 ```
+
+---
+
+## 15. Parameter Usage Reference Table
+
+This section provides a complete reference of every configuration parameter and exactly how it is used in the print time estimation calculations.
+
+### 15.1 Core Motion Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `max_velocity` | `[printer]` section | 100.0 | mm/s | **Move creation:** `velocity = min(requested_velocity, max_velocity)` for kinematic moves. Caps the maximum cruise velocity any move can achieve. Used in: `max_cruise_v2 = velocity²` |
+| `max_acceleration` | `[printer]` section | 100.0 | mm/s² | **Move creation:** Sets `acceleration` field for kinematic moves. **Velocity constraints:** `max_dv2 = 2 × distance × max_acceleration`. **Junction deviation:** `junction_deviation = scv² × 0.41421356 / max_acceleration`. **Accel-to-decel:** When using `minimum_cruise_ratio`: `accel_to_decel = max_acceleration × (1 - ratio)` |
+| `square_corner_velocity` | `[printer]` section | 5.0 | mm/s | **Junction deviation calculation:** `junction_deviation = scv² × (√2 - 1) / max_acceleration`. This derived value is then used in junction velocity: `junction_v2 = r × junction_deviation × acceleration` where `r` is derived from the angle between moves |
+| `max_accel_to_decel` | `[printer]` section | 50.0 | mm/s² | **Legacy method for accel_to_decel:** `accel_to_decel = min(max_accel_to_decel, max_acceleration)`. The `accel_to_decel` value is used in: `smoothed_dv2 = 2 × distance × accel_to_decel`. Only used if `minimum_cruise_ratio` is not set |
+| `minimum_cruise_ratio` | `[printer]` section | None | ratio (0-1) | **Modern method for accel_to_decel:** `accel_to_decel = max_acceleration × (1.0 - clamp(ratio, 0, 1))`. Takes precedence over `max_accel_to_decel`. A ratio of 0.5 means cruise velocity is maintained at least 50% of the time |
+
+### 15.2 Derived Values (Calculated from Core Parameters)
+
+| Derived Value | Calculation | Usage |
+|---------------|-------------|-------|
+| `junction_deviation` | `scv² × 0.41421356 / max_acceleration` | Used in junction velocity calculation: `r × junction_deviation × acceleration`. Higher values allow faster cornering |
+| `accel_to_decel` | See above (from `minimum_cruise_ratio` or `max_accel_to_decel`) | Used to calculate `smoothed_dv2 = 2 × distance × accel_to_decel`. Controls velocity smoothing between moves |
+
+### 15.3 Extruder Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `max_extrude_only_velocity` | `[extruder]` section | - | mm/s | **Extruder limiter check:** For extrude-only moves: `limited_velocity = max_extrude_only_velocity / e_rate`. Applied via `move.limit_speed()` which updates `max_cruise_v2` |
+| `max_extrude_only_accel` | `[extruder]` section | - | mm/s² | **Extruder limiter check:** For extrude-only moves: `limited_accel = max_extrude_only_accel / e_rate`. Applied via `move.limit_speed()` which updates `acceleration` and `max_dv2` |
+| `instantaneous_corner_velocity` | `[extruder]` section | 1.0 | mm/s | **Extruder junction speed:** When extrusion rate changes between moves: `extruder_v2 = (icv / \|Δe_rate\|)²`. This becomes one of the constraints in `max_start_v2 = min(extruder_v2, ...)` |
+
+### 15.4 Axis-Specific Limit Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `max_x_velocity` | `[printer]` section | None | mm/s | **Axis limiter check:** `ratio = move_distance / \|delta.x\|`, then `limited_velocity = max_x_velocity × ratio`. Only applied if both velocity and accel are set |
+| `max_x_accel` | `[printer]` section | None | mm/s² | **Axis limiter check:** `limited_accel = max_x_accel × ratio`. Updates move's `acceleration` and recalculates `max_dv2` |
+| `max_y_velocity` | `[printer]` section | None | mm/s | **Axis limiter check:** Same as X-axis: `ratio = move_distance / \|delta.y\|`, `limited_velocity = max_y_velocity × ratio` |
+| `max_y_accel` | `[printer]` section | None | mm/s² | **Axis limiter check:** `limited_accel = max_y_accel × ratio` |
+| `max_z_velocity` | `[printer]` section | None | mm/s | **Axis limiter check:** Same as X/Y: `ratio = move_distance / \|delta.z\|`, `limited_velocity = max_z_velocity × ratio`. Critical for layer changes |
+| `max_z_accel` | `[printer]` section | None | mm/s² | **Axis limiter check:** `limited_accel = max_z_accel × ratio`. Z-axis typically has much lower accel (e.g., 200 mm/s²) |
+
+### 15.5 Firmware Retraction Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `retract_length` | `[firmware_retraction]` section | - | mm | **G10 retract:** Creates synthetic move with `delta_E = -retract_length`. **G11 unretract:** Combined with `unretract_extra_length` for prime: `unretract_length = retract_length + unretract_extra_length` |
+| `retract_speed` | `[firmware_retraction]` section | - | mm/s | **G10 retract:** Sets `velocity = retract_speed` for the retraction move before creating the PlanningMove |
+| `unretract_extra_length` | `[firmware_retraction]` section | 0.0 | mm | **G11 unretract:** `unretract_length = retract_length + unretract_extra_length`. Extra material to compensate for oozing |
+| `unretract_speed` | `[firmware_retraction]` section | - | mm/s | **G11 unretract:** Sets `velocity = unretract_speed` for the unretraction move |
+| `lift_z` | `[firmware_retraction]` section | 0.0 | mm | **G10 retract:** If > 0, creates additional Z move with `delta_Z = +lift_z`. **G11 unretract:** Creates Z move with `delta_Z = -lifted_z` |
+
+### 15.6 Arc Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `mm_per_arc_segment` | `[gcode_arcs]` section → `resolution` | None | mm | **Arc segmentation:** `segments = max(1, floor(arc_length / mm_per_arc_segment))`. Each segment becomes a linear move. **If not set:** G2/G3 commands are ignored entirely |
+
+### 15.7 G-code Runtime Parameters
+
+| Parameter | Source | Default | Unit | Exact Usage in Calculations |
+|-----------|--------|---------|------|----------------------------|
+| `F` (feedrate) | G-code `G0`/`G1` commands | `max_velocity` | mm/min | **Velocity setting:** `velocity = F / 60` (convert to mm/s). Used as `requested_velocity` in move creation: `max_cruise_v2 = min(velocity, max_velocity)²` |
+| `P` (dwell) | G-code `G4` command | 250 | ms | **Dwell time:** `delay = P / 1000` seconds. Added directly to total time |
+
+### 15.8 Complete Parameter Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PARAMETER USAGE FLOW                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PRINTER CONFIG                     MOVE CREATION                            │
+│  ┌──────────────────┐              ┌─────────────────────────────────────┐  │
+│  │ max_velocity     │──────────────▶│ velocity = min(F/60, max_velocity) │  │
+│  │ max_acceleration │──────────────▶│ acceleration = max_acceleration    │  │
+│  │                  │              │ max_dv2 = 2 × dist × accel          │  │
+│  │ square_corner_   │              │ max_cruise_v2 = velocity²           │  │
+│  │ velocity         │──┐           └─────────────────────────────────────┘  │
+│  └──────────────────┘  │                          │                          │
+│           │            │                          ▼                          │
+│           │            │           ┌─────────────────────────────────────┐  │
+│           ▼            │           │         AXIS LIMITERS               │  │
+│  ┌──────────────────┐  │           │ ┌─────────────────────────────────┐ │  │
+│  │ junction_        │  │           │ │ ratio = dist / |axis_component| │ │  │
+│  │ deviation =      │◀─┘           │ │ vel = max_axis_vel × ratio      │ │  │
+│  │ scv² × 0.414 /   │              │ │ accel = max_axis_accel × ratio  │ │  │
+│  │ max_accel        │              │ └─────────────────────────────────┘ │  │
+│  └──────────────────┘              └─────────────────────────────────────┘  │
+│           │                                       │                          │
+│           │                                       ▼                          │
+│           │                        ┌─────────────────────────────────────┐  │
+│           │                        │       EXTRUDER LIMITER              │  │
+│           │                        │ (extrude-only moves)                │  │
+│           │                        │ vel = max_extrude_only_vel / e_rate │  │
+│           │                        │ accel = max_extrude_only_accel /    │  │
+│           │                        │         e_rate                      │  │
+│           │                        └─────────────────────────────────────┘  │
+│           │                                       │                          │
+│           ▼                                       ▼                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    JUNCTION VELOCITY CALCULATION                     │    │
+│  │                                                                      │    │
+│  │  cos_θ = -dot(rate1.xyz, rate2.xyz)                                 │    │
+│  │  sin_θ/2 = sqrt(0.5 × (1 - cos_θ))                                  │    │
+│  │  r = sin_θ/2 / (1 - sin_θ/2)                                        │    │
+│  │  tan_θ/2 = sin_θ/2 / sqrt(0.5 × (1 + cos_θ))                        │    │
+│  │                                                                      │    │
+│  │  junction_v2 = r × junction_deviation × acceleration  ◀────────────┼────┤
+│  │  centripetal_v2 = 0.5 × distance × tan_θ/2 × acceleration           │    │
+│  │  extruder_v2 = (instant_corner_velocity / |Δe_rate|)² ◀─────────────┼────┤
+│  │                                                                      │    │
+│  │  max_start_v2 = min(junction_v2, centripetal_v2, extruder_v2, ...)  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                      │                                       │
+│  ┌──────────────────┐                │                                       │
+│  │ max_accel_to_    │                ▼                                       │
+│  │ decel     OR     │    ┌─────────────────────────────────────────────┐    │
+│  │ minimum_cruise_  │───▶│           VELOCITY SMOOTHING                 │    │
+│  │ ratio            │    │                                              │    │
+│  └──────────────────┘    │  accel_to_decel = max_accel × (1 - ratio)   │    │
+│                          │  smoothed_dv2 = 2 × distance × accel_to_decel│    │
+│                          │  max_smoothed_v2 = min(max_start_v2,         │    │
+│                          │                    prev_smoothed + prev_sdv2)│    │
+│                          └─────────────────────────────────────────────┘    │
+│                                      │                                       │
+│                                      ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    TWO-PASS VELOCITY PLANNING                        │    │
+│  │                                                                      │    │
+│  │  Resolves: start_v, cruise_v, end_v for each move                   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                      │                                       │
+│                                      ▼                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    TIME CALCULATION (per move)                       │    │
+│  │                                                                      │    │
+│  │  accel_dist = (cruise_v² - start_v²) / (2 × acceleration)           │    │
+│  │  accel_time = accel_dist / ((start_v + cruise_v) / 2)               │    │
+│  │                                                                      │    │
+│  │  decel_dist = (cruise_v² - end_v²) / (2 × acceleration)             │    │
+│  │  decel_time = decel_dist / ((cruise_v + end_v) / 2)                 │    │
+│  │                                                                      │    │
+│  │  cruise_dist = max(0, distance - accel_dist - decel_dist)           │    │
+│  │  cruise_time = cruise_dist / cruise_v                               │    │
+│  │                                                                      │    │
+│  │  total_time = accel_time + cruise_time + decel_time                 │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.9 Parameter Sensitivity Analysis
+
+| Parameter | Impact Level | Effect on Print Time |
+|-----------|--------------|---------------------|
+| `max_velocity` | **HIGH** | Directly caps cruise velocity. Increasing reduces time for long straight moves |
+| `max_acceleration` | **VERY HIGH** | Affects accel/decel phases AND junction velocity calculation. Higher values significantly reduce time on prints with many direction changes |
+| `square_corner_velocity` | **HIGH** | Controls cornering speed. Higher values reduce time on prints with many corners/curves. Typical range: 1-15 mm/s |
+| `max_accel_to_decel` / `minimum_cruise_ratio` | **MEDIUM** | Affects velocity smoothing. Lower `max_accel_to_decel` (or higher `minimum_cruise_ratio`) = more conservative = longer times |
+| `instant_corner_velocity` | **MEDIUM** | Limits junction speed when extrusion rate changes. Most noticeable on prints with variable line widths |
+| `max_z_velocity` / `max_z_accel` | **LOW-MEDIUM** | Only affects layer changes and Z-moves. Important for tall prints with many layers |
+| `mm_per_arc_segment` | **LOW** | Only affects G2/G3 arcs. Smaller values = more segments = slightly more accurate but slower calculation |
 
 ---
 
